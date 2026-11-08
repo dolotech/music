@@ -1,0 +1,48 @@
+[project]
+name = "soundcloud-music-tool"
+version = "0.2.0"
+description = "SoundCloud search, preview, and authorized download client"
+requires-python = ">=3.13"
+dependencies = [
+  "imageio-ffmpeg==0.8.1",
+  "mutagen==1.48.1",
+  "pygame-ce==2.5.8",
+  "yt-dlp==2026.10.26",
+]
+
+[project.scripts]
+music-gui = "music_app.ui:main"
+music-cli = "music_app.cli:main"
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --cov=music_app --cov=soundcloud_gui --cov=soundcloud_downloader --cov-report=term-missing --cov-fail-under=90"
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+  "network: tests that require live SoundCloud access",
+  "gui: tests that initialize a Tk window",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["music_app"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "pragma: no cover",
+  "if __name__ == .__main__.:",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "C4"]
+
+[tool.mypy]
+python_version = "3.13"
+warn_unused_ignores = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true

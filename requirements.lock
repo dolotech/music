@@ -1,0 +1,10 @@
+# Runtime lock for CPython 3.13 on macOS arm64.
+# Generated from wheels accepted by pip and pinned with SHA-256 hashes.
+yt-dlp==2026.10.26 \
+    --hash=sha256:a05c5b5d8562f7e8a62f5334348b406af4930d56d3a65f8021d14af0e22339ae
+imageio-ffmpeg==0.8.1 \
+    --hash=sha256:5636d691e36e5274b13fe38182b1f627b2e35dcecc63944012c2470f9484fc45
+pygame-ce==2.5.8 \
+    --hash=sha256:56441a9bb75c2461750dc0e6e4a46e3833b3cf6339bfbaf16f93ecac037510f3
+mutagen==1.48.1 \
+    --hash=sha256:4f077fe87d3fc7fba259aa63d8c026b18382ca6a42ef37c61e16f1b1b5b82fe7

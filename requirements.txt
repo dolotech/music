@@ -1,0 +1,4 @@
+yt-dlp==2026.10.26
+imageio-ffmpeg==0.8.1
+pygame-ce==2.5.8
+mutagen==1.48.1
