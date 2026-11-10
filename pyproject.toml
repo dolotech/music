@@ -1,12 +1,16 @@
 [project]
 name = "soundcloud-music-tool"
-version = "0.2.0"
+version = "0.3.0"
 description = "SoundCloud search, preview, and authorized download client"
 requires-python = ">=3.13"
 dependencies = [
   "imageio-ffmpeg==0.8.1",
   "mutagen==1.48.1",
   "pygame-ce==2.5.8",
+  "sounddevice==0.5.6",
+  "brotli==1.2.1",
+  "certifi==2026.10.23",
+  "curl_cffi==0.17.0",
   "yt-dlp==2026.10.26",
 ]
 

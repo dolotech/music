@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Compatibility entry point for the modular desktop application."""
 
+import sys
+
 from music_app.models import (
     TrackCandidate,
     format_count,
@@ -21,4 +23,8 @@ __all__ = [
 
 
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        from music_app.selftest import main as selftest_main
+
+        raise SystemExit(selftest_main())
     raise SystemExit(main())

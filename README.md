@@ -72,7 +72,9 @@ cd /Users/stargame/code/music
 
 - 搜索采用 TTL 缓存和请求限速。
 - 下载、搜索和试听均有独立取消令牌。
-- 试听缓存有容量上限，并使用原子文件替换。
+- 试听默认采用 FFmpeg → PCM → `sounddevice` 的边下载边播放，不生成完整
+  临时歌曲文件；暂停、切歌和停止会终止对应 FFmpeg 进程。
+- 如果流式设备不可用，才回退到有容量上限的缓存播放器。
 - 下载结束后使用 Mutagen 校验音频，并记录 SHA-256、格式、码率和来源。
 - SQLite 索引保存在下载目录的 `.music_index.sqlite3`。
 - 配置保存在 `work/config.json`。
@@ -164,7 +166,7 @@ python soundcloud_downloader.py \
 
 ```bash
 source .venv/bin/activate
-ruff check music_app tests soundcloud_gui.py soundcloud_downloader.py
+ruff check music_app tests tools soundcloud_gui.py soundcloud_downloader.py
 mypy music_app --ignore-missing-imports
 SDL_AUDIODRIVER=dummy pytest -m "not network"
 ```
@@ -177,12 +179,32 @@ RUN_NETWORK_TESTS=1 pytest tests/test_live_soundcloud.py --no-cov
 
 ## 当前生产边界
 
-技术层的模块拆分、依赖锁定、配置、日志、测试、取消、缓存、文件校验和授权
+技术层的模块拆分、依赖锁定、配置、日志、测试、取消、流式播放、文件校验和授权
 门禁已经落地。仍有两个发布外部门禁：
 
 1. 需要确认 SoundCloud API/合作授权和可下载内容的许可边界。
-2. 需要 Apple Developer 证书完成签名、公证；当前播放器仍使用
-   FFmpeg 临时缓存加 Pygame，而不是 libmpv 流式后端。
+2. 需要 Apple Developer 证书完成签名、公证和正式安装包发布。
 
 详见 [PRODUCTION_REVIEW.md](PRODUCTION_REVIEW.md) 和
-[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)。
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)。试听和搜索实测见
+[PERFORMANCE_AND_BUILD_REVIEW.md](PERFORMANCE_AND_BUILD_REVIEW.md)。
+
+## macOS 打包
+
+```bash
+make package-dev
+```
+
+产物：
+
+```text
+dist/SoundCloudMusic/
+dist/SoundCloudMusic-macOS-arm64.zip
+```
+
+正式签名构建：
+
+```bash
+export CODESIGN_IDENTITY="Developer ID Application: ..."
+make package
+```

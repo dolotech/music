@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import sys
+from types import ModuleType
+from urllib.error import HTTPError, URLError
+
 import pytest
 
 from music_app.catalog import (
     MinIntervalLimiter,
     SearchService,
+    SoundCloudFastSearchBackend,
     TTLCache,
     YtDlpSearchBackend,
 )
-from music_app.errors import TaskCancelled
+from music_app.errors import NetworkError, TaskCancelled
 from music_app.security import CancellationToken
 
 
@@ -165,12 +170,191 @@ def test_ytdlp_backend_uses_options(monkeypatch):
             calls["download"] = download
             return {"entries": [{"id": "1"}]}
 
+    yt_dlp_module = ModuleType("yt_dlp")
+    yt_dlp_module.YoutubeDL = FakeYDL
+    networking_module = ModuleType("yt_dlp.networking")
+    impersonate_module = ModuleType("yt_dlp.networking.impersonate")
+    impersonate_module.ImpersonateTarget = type(
+        "ImpersonateTarget",
+        (),
+        {"from_str": classmethod(lambda _cls, value: f"target:{value}")},
+    )
+    yt_dlp_module.networking = networking_module
+    monkeypatch.setitem(sys.modules, "yt_dlp", yt_dlp_module)
+    monkeypatch.setitem(sys.modules, "yt_dlp.networking", networking_module)
     monkeypatch.setitem(
-        __import__("sys").modules,
-        "yt_dlp",
-        type("YDLModule", (), {"YoutubeDL": FakeYDL}),
+        sys.modules,
+        "yt_dlp.networking.impersonate",
+        impersonate_module,
     )
     entries = YtDlpSearchBackend().search("query", 7)
     assert entries == [{"id": "1"}]
     assert calls["url"] == "scsearch7:query"
     assert calls["download"] is False
+    assert "impersonate" in calls["options"]
+
+
+def test_fast_search_backend_normalizes_api_results():
+    payload = {
+        "collection": [
+            {
+                "kind": "track",
+                "id": 1,
+                "title": "成都",
+                "duration": 328000,
+                "likes_count": 131,
+                "permalink_url": "https://soundcloud.com/a/b",
+                "downloadable": False,
+                "license": "all-rights-reserved",
+                "policy": "ALLOW",
+                "user": {"username": "赵雷"},
+            },
+            {
+                "kind": "track",
+                "id": 2,
+                "title": "blocked",
+                "permalink_url": "https://soundcloud.com/blocked",
+                "policy": "BLOCK",
+            },
+            {"kind": "playlist"},
+        ]
+    }
+    urls = []
+    backend = SoundCloudFastSearchBackend(
+        client_id_provider=lambda: "client-id",
+        request_json=lambda url: urls.append(url) or payload,
+    )
+    entries = backend.search("成都", 12)
+    assert len(entries) == 1
+    assert entries[0]["duration"] == 328
+    assert entries[0]["uploader"] == "赵雷"
+    assert "client_id=client-id" in urls[0]
+
+
+def test_fast_search_backend_falls_back_without_client_id():
+    fallback = FakeBackend([{"id": "fallback"}])
+    backend = SoundCloudFastSearchBackend(
+        fallback=fallback,
+        client_id_provider=lambda: None,
+    )
+    assert backend.search("query", 30) == [{"id": "fallback"}]
+    assert fallback.calls == [("query", 15)]
+
+
+def test_fast_search_backend_refreshes_on_auth_error():
+    fallback = FakeBackend([{"id": "fallback"}])
+
+    def unauthorized(_url):
+        raise HTTPError("https://api", 401, "unauthorized", {}, None)
+
+    backend = SoundCloudFastSearchBackend(
+        fallback=fallback,
+        client_id_provider=lambda: "expired",
+        request_json=unauthorized,
+    )
+    assert backend.search("query", 10) == [{"id": "fallback"}]
+    assert fallback.calls
+    assert backend._client_id is None
+
+
+def test_fast_search_backend_uses_fallback_after_network_error():
+    def offline(_url):
+        raise NetworkError("offline")
+
+    fallback = FakeBackend([{"id": "fallback"}])
+    backend = SoundCloudFastSearchBackend(
+        fallback=fallback,
+        client_id_provider=lambda: "client-id",
+        request_json=offline,
+    )
+    assert backend.search("query", 30) == [{"id": "fallback"}]
+    assert fallback.calls == [("query", 15)]
+
+
+def test_fast_search_backend_surfaces_network_error_if_fallback_fails():
+    def offline(_url):
+        raise NetworkError("direct offline")
+
+    backend = SoundCloudFastSearchBackend(
+        fallback=FakeBackend(error=NetworkError("fallback offline")),
+        client_id_provider=lambda: "client-id",
+        request_json=offline,
+    )
+    with pytest.raises(NetworkError) as caught:
+        backend.search("query", 10)
+    assert caught.value.detail == "direct offline"
+
+
+def test_search_service_logs_cache_hit():
+    class Logger:
+        def __init__(self):
+            self.events = []
+
+        def info(self, message, *args, extra=None):
+            self.events.append((message, extra))
+
+    logger = Logger()
+    service = SearchService(
+        SoundCloudFastSearchBackend(
+            client_id_provider=lambda: "client",
+            request_json=lambda _url: {"collection": sample_entries()},
+        ),
+        min_interval_seconds=0,
+        logger=logger,
+    )
+    service.search("成都", 10)
+    service.search("成都", 10)
+    assert any(item[1]["event"] == "search_cache_hit" for item in logger.events)
+
+
+def test_fast_search_backend_missing_client_id_falls_back():
+    fallback = FakeBackend([{"id": "fallback"}])
+    backend = SoundCloudFastSearchBackend(
+        fallback=fallback,
+        client_id_provider=lambda: None,
+    )
+    assert backend.search("query", 10) == [{"id": "fallback"}]
+
+
+def test_fast_search_backend_http_exception_falls_back():
+    fallback = FakeBackend([{"id": "fallback"}])
+
+    def broken(_url):
+        raise ValueError("bad payload")
+
+    backend = SoundCloudFastSearchBackend(
+        fallback=fallback,
+        client_id_provider=lambda: "client",
+        request_json=broken,
+    )
+    assert backend.search("query", 10) == [{"id": "fallback"}]
+
+
+def test_fast_search_backend_network_request(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"collection": []}'
+
+    monkeypatch.setattr(
+        "music_app.catalog.urlopen",
+        lambda *_args, **_kwargs: Response(),
+    )
+    assert SoundCloudFastSearchBackend._request_json(
+        "https://api.test",
+        2,
+    ) == {"collection": []}
+
+
+def test_fast_search_backend_request_network_error(monkeypatch):
+    def offline(*_args, **_kwargs):
+        raise URLError("offline")
+
+    monkeypatch.setattr("music_app.catalog.urlopen", offline)
+    with pytest.raises(NetworkError):
+        SoundCloudFastSearchBackend._request_json("https://api.test", 2)

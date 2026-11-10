@@ -19,7 +19,7 @@ if [[ ! -x "$VENV_PYTHON" ]]; then
   python3 -m venv "$PROJECT_DIR/.venv"
 fi
 
-if ! "$VENV_PYTHON" -c "import yt_dlp, imageio_ffmpeg, mutagen, pygame" >/dev/null 2>&1; then
+if ! "$VENV_PYTHON" -c "import yt_dlp, imageio_ffmpeg, mutagen, pygame, sounddevice, certifi, curl_cffi, brotli" >/dev/null 2>&1; then
   echo "首次运行：安装下载依赖..."
   if [[ -f "$PROJECT_DIR/requirements.lock" ]]; then
     "$VENV_PYTHON" -m pip install --disable-pip-version-check -q \

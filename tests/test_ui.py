@@ -12,6 +12,7 @@ import pytest
 from music_app.config import AppConfig
 from music_app.downloads import DownloadProgress
 from music_app.errors import DrmProtectedError, TaskCancelled
+from music_app.media import ResolvedMedia
 from music_app.models import DownloadRecord, TrackCandidate
 from music_app.player import PlayerSnapshot
 from music_app.security import CancellationToken
@@ -535,9 +536,11 @@ def test_stale_search_result_and_preview_generation(gui):
 
 def test_create_default_services_and_window(monkeypatch, tmp_path):
     monkeypatch.setattr("music_app.ui.PROJECT_DIR", tmp_path)
+    monkeypatch.setattr("music_app.ui.DATA_DIR", tmp_path)
     monkeypatch.setattr("music_app.ui.WORK_DIR", tmp_path / "work")
     services = create_default_services()
     assert services.player is not None
+    assert services.streaming_enabled is True
     assert services.config_store.path == tmp_path / "work" / "config.json"
     root = tk.Tk()
     root.withdraw()
@@ -553,16 +556,22 @@ def test_switch_preview_cancels_previous_network(gui, tmp_path):
         def __init__(self):
             self.started = threading.Event()
             self.tokens = []
+            self.results = []
 
         def prepare(self, track, token, preserve=None):
             self.tokens.append(token)
-            if track.track_id == "a":
-                self.started.set()
-                token.wait(2)
-                token.raise_if_cancelled()
-            path = tmp_path / f"{track.track_id}.mp3"
-            path.write_bytes(b"audio")
-            return path
+            try:
+                if track.track_id == "a":
+                    self.started.set()
+                    token.wait(2)
+                    token.raise_if_cancelled()
+                path = tmp_path / f"{track.track_id}.mp3"
+                path.write_bytes(b"audio")
+                self.results.append((track.track_id, path))
+                return path
+            except BaseException as exc:
+                self.results.append((track.track_id, exc))
+                raise
 
     preview = SwitchingPreview()
     app.services.preview_service = preview
@@ -597,8 +606,18 @@ def test_switch_preview_cancels_previous_network(gui, tmp_path):
     app.start_preview()
     assert wait_until(
         app.root,
-        lambda: app.services.player.loaded == tmp_path / "b.mp3",
-    )
+        lambda: len(preview.tokens) == 2,
+        timeout=2,
+    ), (len(preview.tokens), app.tree.selection(), app.preview_generation)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        app.root.update()
+        while not app.events.empty():
+            app._handle_event(app.events.get_nowait())
+        if app.services.player.loaded == tmp_path / "b.mp3":
+            break
+        time.sleep(0.01)
+    assert app.services.player.loaded == tmp_path / "b.mp3", preview.results
     assert preview.tokens[0].is_cancelled()
     assert not preview.tokens[1].is_cancelled()
 
@@ -624,3 +643,87 @@ def test_stop_during_preview_loading_cancels_transfer(gui, tmp_path):
     assert token_holder[0].is_cancelled()
     assert not app.preview_loading
     assert str(app.preview_button["state"]) == "normal"
+
+
+def test_streaming_preview_uses_resolved_media(gui):
+    app, services = gui
+
+    class StreamingPreview(FakePreview):
+        def resolve_media(self, track, token):
+            token.raise_if_cancelled()
+            return ResolvedMedia(
+                "https://media.test/audio.m3u8",
+                {"Referer": "https://soundcloud.com"},
+                track.duration,
+            )
+
+    services.streaming_enabled = True
+    services.preview_service = StreamingPreview(Path("/unused"))
+    app._show_search_results(0, "x", candidates())
+    select(app, "full")
+    app.start_preview()
+    assert wait_until(
+        app.root,
+        lambda: isinstance(app.services.player.loaded, ResolvedMedia),
+    )
+    assert app.services.player.loaded.url.endswith("audio.m3u8")
+
+
+def test_playback_backend_error_classification(gui, monkeypatch):
+    app, services = gui
+    errors = []
+    monkeypatch.setattr(
+        "music_app.ui.messagebox.showerror",
+        lambda title, message: errors.append((title, message)),
+    )
+    cases = [
+        (
+            "SSL: UNEXPECTED_EOF_WHILE_READING",
+            "音频流网络失败",
+        ),
+        (
+            "音频流首包超时",
+            "音频流加载失败",
+        ),
+        (
+            "Error querying device -1",
+            "音频输出失败",
+        ),
+    ]
+    for message, expected_title in cases:
+        services.player_backend = type(
+            "Backend",
+            (),
+            {"last_error": message},
+        )()
+        app._reported_audio_error = None
+        app._update_player_display()
+        assert errors[-1][0] == expected_title
+    assert "音频输出失败" in app.status_var.get()
+
+
+def test_player_displays_buffering_state(gui):
+    app, _services = gui
+
+    class BufferingPlayer(FakePlayer):
+        def __init__(self):
+            super().__init__()
+            self.buffering = True
+
+        def tick(self):
+            return PlayerSnapshot(
+                loaded=True,
+                playing=True,
+                position=0,
+                duration=120,
+                finished=False,
+                buffering=self.buffering,
+            )
+
+    app.services.player = BufferingPlayer()
+    app._active_track_title = "缓冲测试"
+    app._update_player_display()
+    assert "正在缓冲音频流" in app.status_var.get()
+    app.services.player.buffering = False
+    app._update_player_display()
+    assert "正在流式试听整首" in app.status_var.get()

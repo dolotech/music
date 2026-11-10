@@ -17,20 +17,27 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Protocol
 
-from .catalog import SearchService, YtDlpSearchBackend
+from .catalog import SearchService, SoundCloudFastSearchBackend
 from .config import AppConfig, ConfigStore
 from .downloads import DownloadProgress, DownloadService, DownloadSettings
 from .errors import TaskCancelled, map_exception, user_error_text
 from .json_logging import configure_logging
-from .media import PreviewCache, PreviewService
+from .media import PreviewCache, PreviewService, ResolvedMedia
 from .models import DownloadRecord, TrackCandidate
-from .player import AudioPlayer, PlayerSnapshot, PygameBackend
+from .paths import app_data_dir
+from .player import (
+    AudioPlayer,
+    PlayerSnapshot,
+    PygameBackend,
+    StreamingPcmBackend,
+)
 from .security import CancellationToken
 from .storage import DownloadRepository, DownloadStaging
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
-WORK_DIR = PROJECT_DIR / "work"
-DEFAULT_DOWNLOAD_DIR = PROJECT_DIR / "download"
+DATA_DIR = app_data_dir()
+WORK_DIR = DATA_DIR / "work"
+DEFAULT_DOWNLOAD_DIR = DATA_DIR / "download"
 SORT_OPTIONS = ("综合排行", "匹配度优先", "点赞数优先")
 SORT_MODES = {
     "综合排行": "combined",
@@ -62,7 +69,12 @@ class PreviewProtocol(Protocol):
 
 
 class PlayerProtocol(Protocol):
-    def load(self, path: Path, duration: float, autoplay: bool = True) -> None: ...
+    def load(
+        self,
+        source: Path | ResolvedMedia,
+        duration: float,
+        autoplay: bool = True,
+    ) -> None: ...
     def toggle(self) -> None: ...
     def seek(self, position: float) -> None: ...
     def stop(self) -> None: ...
@@ -80,6 +92,8 @@ class AppServices:
     player: PlayerProtocol | None
     player_backend: object | None
     logger: logging.Logger
+    streaming_enabled: bool = False
+    audio_device_name: str = ""
 
 
 def create_default_services() -> AppServices:
@@ -104,23 +118,45 @@ def create_default_services() -> AppServices:
     )
     preview_service = PreviewService(preview_cache)
 
-    backend = None
-    player = None
+    backend: StreamingPcmBackend | PygameBackend | None = None
+    player: AudioPlayer | None = None
+    streaming_enabled = False
+    audio_device_name = ""
     try:
-        backend = PygameBackend()
+        backend = StreamingPcmBackend()
         player = AudioPlayer(backend)
+        streaming_enabled = True
+        try:
+            device = backend.sounddevice.query_devices(kind="output")
+            audio_device_name = str(device.get("name") or "")
+        except Exception:
+            audio_device_name = ""
+        logger.info(
+            "streaming audio backend selected",
+            extra={"event": "streaming_audio_backend_selected"},
+        )
     except Exception:
-        logger.exception("audio backend initialization failed")
+        logger.exception("streaming audio backend initialization failed")
+        try:
+            backend = PygameBackend()
+            player = AudioPlayer(backend)
+        except Exception:
+            logger.exception("fallback audio backend initialization failed")
 
     return AppServices(
         config=config,
         config_store=config_store,
-        search_service=SearchService(YtDlpSearchBackend()),
+        search_service=SearchService(
+            SoundCloudFastSearchBackend(),
+            logger=logger,
+        ),
         download_service=download_service,
         preview_service=preview_service,
         player=player,
         player_backend=backend,
         logger=logger,
+        streaming_enabled=streaming_enabled,
+        audio_device_name=audio_device_name,
     )
 
 
@@ -154,6 +190,9 @@ class SoundCloudApp:
         self.preview_loading = False
         self.preview_seeking = False
         self.updating_player_scale = False
+        self._reported_audio_error: str | None = None
+        self._player_buffering = False
+        self._active_track_title = ""
 
         self.download_dir = self._resolve_download_dir()
         self._apply_window_geometry()
@@ -194,7 +233,7 @@ class SoundCloudApp:
 
     def _resolve_download_dir(self) -> Path:
         path = Path(self.config.download_dir)
-        return path if path.is_absolute() else PROJECT_DIR / path
+        return path if path.is_absolute() else DATA_DIR / path
 
     def _font(self, size: int, weight: str = "normal") -> tuple:
         families = set(tkfont.families(self.root))
@@ -1085,21 +1124,32 @@ class SoundCloudApp:
         self.preview_generation += 1
         generation = self.preview_generation
         self.preview_loading = True
+        self._reported_audio_error = None
         self._update_action_state()
         self.services.player.release()
         self.play_button.configure(state="disabled", text="播放")
         self.stop_button.configure(state="normal")
-        self.status_var.set(f"正在加载整首试听：{track.title}")
+        action = "建立音频流" if self.services.streaming_enabled else "加载整首试听"
+        self.status_var.set(f"正在{action}：{track.title}")
         preserve_tracks = set(self.tree.selection())
 
         def worker() -> None:
             try:
-                path = self.services.preview_service.prepare(
-                    track,
-                    token,
-                    preserve=preserve_tracks,
-                )
-                self._emit("preview_ready", generation, track, path)
+                if self.services.streaming_enabled and hasattr(
+                    self.services.preview_service,
+                    "resolve_media",
+                ):
+                    media = self.services.preview_service.resolve_media(
+                        track,
+                        token,
+                    )
+                else:
+                    media = self.services.preview_service.prepare(
+                        track,
+                        token,
+                        preserve=preserve_tracks,
+                    )
+                self._emit("preview_ready", generation, track, media)
             except TaskCancelled:
                 return
             except Exception as exc:
@@ -1111,7 +1161,7 @@ class SoundCloudApp:
         self,
         generation: int,
         track: TrackCandidate,
-        path: Path,
+        path: Path | ResolvedMedia,
     ) -> None:
         if generation != self.preview_generation:
             return
@@ -1129,7 +1179,15 @@ class SoundCloudApp:
         self.player_scale.configure(to=max(1.0, track.duration or 1.0))
         self.play_button.configure(state="normal", text="暂停")
         self.stop_button.configure(state="normal")
-        self.status_var.set(f"正在试听整首：{track.title}")
+        output = (
+            f"（输出：{self.services.audio_device_name}）"
+            if self.services.audio_device_name
+            else ""
+        )
+        mode = "流式试听整首" if self.services.streaming_enabled else "试听整首"
+        self._active_track_title = track.title
+        self._player_buffering = False
+        self.status_var.set(f"正在{mode}：{track.title}{output}")
         self._update_action_state()
 
     def toggle_playback(self) -> None:
@@ -1197,6 +1255,41 @@ class SoundCloudApp:
         if player is None or self.preview_seeking:
             return
         snapshot = player.tick()
+        backend_error = getattr(self.services.player_backend, "last_error", None)
+        if backend_error and backend_error != self._reported_audio_error:
+            error_text = str(backend_error)
+            self._reported_audio_error = error_text
+            mapped = map_exception(RuntimeError(error_text))
+            if mapped.code == "network_error":
+                title = "音频流网络失败"
+            elif "首包超时" in error_text or "未返回数据" in error_text:
+                title = "音频流加载失败"
+            else:
+                title = "音频输出失败"
+            self.status_var.set(title)
+            self.logger.error(
+                "playback backend failed",
+                extra={
+                    "event": "playback_backend_failed",
+                    "error_code": mapped.code,
+                },
+            )
+            messagebox.showerror(title, error_text)
+            return
+        if snapshot.buffering:
+            self._player_buffering = True
+            self.status_var.set(f"正在缓冲音频流：{self._active_track_title}")
+            return
+        if self._player_buffering:
+            self._player_buffering = False
+            output = (
+                f"（输出：{self.services.audio_device_name}）"
+                if self.services.audio_device_name
+                else ""
+            )
+            self.status_var.set(
+                f"正在流式试听整首：{self._active_track_title}{output}"
+            )
         if not snapshot.loaded:
             return
         self._set_player_display(snapshot.position, snapshot.duration)

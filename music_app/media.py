@@ -46,9 +46,32 @@ class YtDlpMediaResolver:
             "no_warnings": True,
             "noplaylist": True,
             "socket_timeout": 30,
+            "retries": 3,
+            "extractor_retries": 3,
         }
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(track.webpage_url, download=False)
+        try:
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+
+            options["impersonate"] = ImpersonateTarget.from_str("chrome")
+        except (ImportError, ValueError):
+            pass
+        last_error = None
+        info = None
+        for attempt in range(3):
+            token.raise_if_cancelled()
+            try:
+                with yt_dlp.YoutubeDL(options) as ydl:
+                    info = ydl.extract_info(track.webpage_url, download=False)
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    token.wait(0.5 * (attempt + 1))
+        if info is None:
+            raise last_error or AppError(
+                "media_resolve_failed",
+                "无法解析音频流。",
+            )
         token.raise_if_cancelled()
         formats = [
             item
@@ -220,6 +243,13 @@ class PreviewService:
         self.resolver = resolver or YtDlpMediaResolver()
         self.runner = runner or ProcessRunner()
         self.ffmpeg_finder = ffmpeg_finder
+
+    def resolve_media(
+        self,
+        track: TrackCandidate,
+        token: CancellationToken,
+    ) -> ResolvedMedia:
+        return self.resolver.resolve(track, token)
 
     def prepare(
         self,

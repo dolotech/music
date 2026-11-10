@@ -129,3 +129,29 @@ def test_player_seek_while_paused_and_release_errors(tmp_path):
     broken = AudioPlayer(BrokenBackend())
     broken.release()
     assert not broken.loaded
+
+
+def test_player_waits_for_stream_buffer(tmp_path):
+    class BufferingBackend(Backend):
+        def __init__(self):
+            super().__init__()
+            self.buffering = True
+
+        def is_buffering(self):
+            return self.buffering
+
+    clock = Clock()
+    backend = BufferingBackend()
+    player = AudioPlayer(backend, clock)
+    player.load(tmp_path / "a.mp3", 10)
+    clock.value = 5
+    snapshot = player.tick()
+    assert snapshot.buffering
+    assert snapshot.position == 0
+    backend.buffering = False
+    clock.value = 6
+    snapshot = player.tick()
+    assert not snapshot.buffering
+    assert snapshot.position == 0
+    clock.value = 7
+    assert player.tick().position == 1

@@ -112,6 +112,10 @@ def map_exception(exc: BaseException) -> AppError:
             "temporary failure in name resolution",
             "network is unreachable",
             "connection reset",
+            "connection closed abruptly",
+            "unexpected_eof_while_reading",
+            "ssl_error_syscall",
+            "ssl_connect",
             "timed out",
             "timeout",
         )

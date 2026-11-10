@@ -29,6 +29,9 @@ def test_strip_ansi():
         ("HTTP Error 401: Unauthorized", AuthenticationRequired),
         ("temporary failure in name resolution", NetworkError),
         ("connection reset by peer", NetworkError),
+        ("SSL: UNEXPECTED_EOF_WHILE_READING", NetworkError),
+        ("SSL_ERROR_SYSCALL", NetworkError),
+        ("SSL_connect: Connection closed abruptly", NetworkError),
         ("operation timed out", NetworkError),
     ],
 )
